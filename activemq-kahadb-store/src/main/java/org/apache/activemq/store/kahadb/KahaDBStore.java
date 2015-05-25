@@ -29,7 +29,6 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -426,25 +425,26 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
             command.setPrioritySupported(isPrioritizedMessages());
             org.apache.activemq.util.ByteSequence packet = wireFormat.marshal(message);
             command.setMessage(new Buffer(packet.getData(), packet.getOffset(), packet.getLength()));
-                store(command, isEnableJournalDiskSyncs() && message.isResponseRequired(), new IndexAware() {
-                    // sync add? (for async, future present from getFutureOrSequenceLong)
-                    Object possibleFuture = message.getMessageId().getFutureOrSequenceLong();
+            store(command, isEnableJournalDiskSyncs() && message.isResponseRequired(), new IndexAware() {
+                // sync add? (for async, future present from getFutureOrSequenceLong)
+                Object possibleFuture = message.getMessageId().getFutureOrSequenceLong();
 
-                    public void sequenceAssignedWithIndexLocked(final long sequence) {
-                        message.getMessageId().setFutureOrSequenceLong(sequence);
-                        if (indexListener != null) {
-                            if (possibleFuture == null) {
-                                trackPendingAdd(dest, sequence);
-                                indexListener.onAdd(new IndexListener.MessageContext(context, message, new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        trackPendingAddComplete(dest, sequence);
-                                    }
-                                }));
-                            }
+                @Override
+                public void sequenceAssignedWithIndexLocked(final long sequence) {
+                    message.getMessageId().setFutureOrSequenceLong(sequence);
+                    if (indexListener != null) {
+                        if (possibleFuture == null) {
+                            trackPendingAdd(dest, sequence);
+                            indexListener.onAdd(new IndexListener.MessageContext(context, message, new Runnable() {
+                                @Override
+                                public void run() {
+                                    trackPendingAddComplete(dest, sequence);
+                                }
+                            }));
                         }
                     }
-                }, null);
+                }
+            }, null);
         }
 
         @Override
@@ -724,7 +724,9 @@ public class KahaDBStore extends MessageDatabase implements PersistenceAdapter {
         public KahaDBTopicMessageStore(ActiveMQTopic destination) throws IOException {
             super(destination);
             this.subscriptionCount.set(getAllSubscriptions().length);
-            asyncTopicMaps.add(asyncTaskMap);
+            if (isConcurrentStoreAndDispatchTopics()) {
+                asyncTopicMaps.add(asyncTaskMap);
+            }
         }
 
         @Override

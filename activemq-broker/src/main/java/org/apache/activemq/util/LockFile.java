@@ -16,6 +16,9 @@
  */
 package org.apache.activemq.util;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -32,12 +35,15 @@ public class LockFile {
 
     private static final boolean DISABLE_FILE_LOCK = Boolean.getBoolean("java.nio.channels.FileLock.broken");
     final private File file;
+    private long lastModified;
 
     private FileLock lock;
-    private RandomAccessFile readFile;
+    private RandomAccessFile randomAccessLockFile;
     private int lockCounter;
     private final boolean deleteOnUnlock;
     private volatile boolean locked;
+
+    private static final Logger LOG = LoggerFactory.getLogger(LockFile.class);
 
     public LockFile(File file, boolean deleteOnUnlock) {
         this.file = file;
@@ -65,16 +71,20 @@ public class LockFile {
         }
         try {
             if (lock == null) {
-                readFile = new RandomAccessFile(file, "rw");
+                randomAccessLockFile = new RandomAccessFile(file, "rw");
                 IOException reason = null;
                 try {
-                    lock = readFile.getChannel().tryLock(0, Math.max(1, readFile.getChannel().size()), false);
+                    lock = randomAccessLockFile.getChannel().tryLock(0, Math.max(1, randomAccessLockFile.getChannel().size()), false);
                 } catch (OverlappingFileLockException e) {
                     reason = IOExceptionSupport.create("File '" + file + "' could not be locked.", e);
                 } catch (IOException ioe) {
                     reason = ioe;
                 }
                 if (lock != null) {
+                    //track lastModified only if we are able to successfully obtain the lock.
+                    randomAccessLockFile.writeLong(System.currentTimeMillis());
+                    randomAccessLockFile.getChannel().force(true);
+                    lastModified = file.lastModified();
                     lockCounter++;
                     System.setProperty(getVmLockKey(), new Date().toString());
                     locked = true;
@@ -131,18 +141,41 @@ public class LockFile {
 
     private void closeReadFile() {
         // close the file.
-        if (readFile != null) {
+        if (randomAccessLockFile != null) {
             try {
-                readFile.close();
+                randomAccessLockFile.close();
             } catch (Throwable ignore) {
             }
-            readFile = null;
+            randomAccessLockFile = null;
+        }
+    }
+
+    /**
+     * @return true if the lock file's last modified does not match the locally cached lastModified, false otherwise
+     */
+    private boolean hasBeenModified() {
+        boolean modified = false;
+
+        //Create a new instance of the File object so we can get the most up to date information on the file.
+        File localFile = new File(file.getAbsolutePath());
+
+        if (localFile.exists()) {
+            if(localFile.lastModified() != lastModified) {
+                LOG.info("Lock file " + file.getAbsolutePath() + ", locked at " + new Date(lastModified) + ", has been modified at " + new Date(localFile.lastModified()));
+                modified = true;
+            }
+        }
+        else {
+            //The lock file is missing
+            LOG.info("Lock file " + file.getAbsolutePath() + ", does not exist");
+            modified = true;
         }
 
+        return modified;
     }
 
     public boolean keepAlive() {
-        locked = locked && lock != null && lock.isValid() && file.exists();
+        locked = locked && lock != null && lock.isValid() && !hasBeenModified();
         return locked;
     }
 
